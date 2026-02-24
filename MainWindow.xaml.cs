@@ -358,6 +358,185 @@ namespace A03_abstraction
             }
         }
 
+        // Copies all rows from source table to destination table using a single transaction.
+        private bool CopyDataWithTransaction(
+            string srcServer,
+            string srcDatabase,
+            string srcTable,
+            string destServer,
+            string destDatabase,
+            string destTable,
+            out string errorMessage)
+        {
+            errorMessage = string.Empty;
+
+            string srcConnString =
+                $"Server={srcServer};Database={srcDatabase};Integrated Security=true;";
+            string destConnString =
+                $"Server={destServer};Database={destDatabase};Integrated Security=true;";
+
+            try
+            {
+                using (SqlConnection srcConn = new SqlConnection(srcConnString))
+                using (SqlConnection destConn = new SqlConnection(destConnString))
+                {
+                    srcConn.Open();
+                    destConn.Open();
+
+                    // Start a transaction on the destination connection
+                    using (SqlTransaction tx = destConn.BeginTransaction())
+                    {
+                        try
+                        {
+                            // Read all rows from source
+                            string selectSql = $"SELECT * FROM {srcTable}";
+                            using (SqlCommand selectCmd = new SqlCommand(selectSql, srcConn))
+                            using (SqlDataReader reader = selectCmd.ExecuteReader())
+                            {
+                                // For each row, build an INSERT command
+                                // We assume schemas match (same columns in same order)
+                                while (reader.Read())
+                                {
+                                    int fieldCount = reader.FieldCount;
+
+                                    // Build column list and parameter list
+                                    var columnNames = new string[fieldCount];
+                                    var paramNames = new string[fieldCount];
+
+                                    for (int i = 0; i < fieldCount; i++)
+                                    {
+                                        string colName = reader.GetName(i);
+                                        columnNames[i] = $"[{colName}]";
+                                        paramNames[i] = $"@p{i}";
+                                    }
+
+                                    string insertSql =
+                                        $"INSERT INTO {destTable} ({string.Join(", ", columnNames)}) " +
+                                        $"VALUES ({string.Join(", ", paramNames)})";
+
+                                    using (SqlCommand insertCmd = new SqlCommand(insertSql, destConn, tx))
+                                    {
+                                        // Add parameters
+                                        for (int i = 0; i < fieldCount; i++)
+                                        {
+                                            object value = reader.GetValue(i);
+                                            insertCmd.Parameters.AddWithValue($"@p{i}", value ?? DBNull.Value);
+                                        }
+
+                                        insertCmd.ExecuteNonQuery();
+                                    }
+                                }
+                            }
+
+                            // If we reach here, all inserts succeeded
+                            tx.Commit();
+                            return true;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Rollback on any error
+                            tx.Rollback();
+                            errorMessage = ex.Message;
+                            return false;
+                        }
+                    }
+                }
+            }
+            catch (Exception exOuter)
+            {
+                errorMessage = exOuter.Message;
+                return false;
+            }
+        }
+
+        private void btnCopyData_Click(object sender, RoutedEventArgs e)
+        {
+            // Read source and destination values
+            string srcServer = txtSourceServer.Text.Trim();
+            string srcDatabase = txtSourceDatabase.Text.Trim();
+            string srcTable = txtSourceTable.Text.Trim();
+
+            string destServer = txtDestServer.Text.Trim();
+            string destDatabase = txtDestDatabase.Text.Trim();
+            string destTable = txtDestTable.Text.Trim();
+
+            if (string.IsNullOrEmpty(srcServer) ||
+                string.IsNullOrEmpty(srcDatabase) ||
+                string.IsNullOrEmpty(srcTable) ||
+                string.IsNullOrEmpty(destServer) ||
+                string.IsNullOrEmpty(destDatabase) ||
+                string.IsNullOrEmpty(destTable))
+            {
+                txtResult.Text = "Please enter all source and destination fields.";
+                return;
+            }
+
+            // 1. Check existence
+            string srcError;
+            bool srcExists = TableExists(srcServer, srcDatabase, srcTable, out srcError);
+
+            string destError;
+            bool destExists = TableExists(destServer, destDatabase, destTable, out destError);
+
+            if (!string.IsNullOrEmpty(srcError))
+            {
+                txtResult.Text = "Source error: " + srcError;
+                return;
+            }
+
+            if (!srcExists)
+            {
+                txtResult.Text = "Source table does NOT exist.";
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(destError))
+            {
+                txtResult.Text = "Destination error: " + destError;
+                return;
+            }
+
+            if (!destExists)
+            {
+                txtResult.Text = "Destination table does NOT exist. Please create it first (using Check Source).";
+                return;
+            }
+
+            // 2. Ensure schemas match
+            string schemaError;
+
+            DataTable? srcSchema = GetTableSchema(srcServer, srcDatabase, srcTable, out schemaError);
+            if (srcSchema == null)
+            {
+                txtResult.Text = "Could not read source schema: " + schemaError;
+                return;
+            }
+
+            DataTable? destSchema = GetTableSchema(destServer, destDatabase, destTable, out schemaError);
+            if (destSchema == null)
+            {
+                txtResult.Text = "Could not read destination schema: " + schemaError;
+                return;
+            }
+
+            bool match = SchemasMatch(srcSchema, destSchema);
+            if (!match)
+            {
+                txtResult.Text = "Source and destination schemas do NOT match. Copy aborted.";
+                return;
+            }
+
+            // 3. Copy data with transaction
+            string copyError;
+            bool success = CopyDataWithTransaction(
+                srcServer, srcDatabase, srcTable,
+                destServer, destDatabase, destTable,
+                out copyError);
+
+            txtResult.Text = success
+                ? "Data copy completed successfully."
+                : "Data copy failed: " + copyError;
+        }
 
     }
 }
