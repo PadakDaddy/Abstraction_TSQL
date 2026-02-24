@@ -25,24 +25,11 @@ namespace A03_abstraction
             InitializeComponent();
         }
 
-        // Check if the source table exists in the specified database.
-        private void btnCheckSource_Click(object sender, RoutedEventArgs e)
+        // Helper method to check if a table exists in a given server/database.
+        private bool TableExists(string server, string database, string tableName, out string errorMessage)
         {
-            // 1. Read values from text boxes
-            string server = txtSourceServer.Text.Trim();
-            string database = txtSourceDatabase.Text.Trim();
-            string table = txtSourceTable.Text.Trim();
+            errorMessage = string.Empty;
 
-            // Basic input validation
-            if (string.IsNullOrEmpty(server) ||
-                string.IsNullOrEmpty(database) ||
-                string.IsNullOrEmpty(table))
-            {
-                txtResult.Text = "Please enter server, database, and table names.";
-                return;
-            }
-
-            // 2. Build connection string (Windows Authentication)
             string connString =
                 $"Server={server};Database={database};Integrated Security=true;";
 
@@ -50,9 +37,8 @@ namespace A03_abstraction
             {
                 using (SqlConnection conn = new SqlConnection(connString))
                 {
-                    conn.Open(); // If this fails, server or database is likely wrong.
+                    conn.Open();
 
-                    // 3. Check if the source table exists
                     string checkTableSql = @"
                         SELECT 1
                         FROM INFORMATION_SCHEMA.TABLES
@@ -61,26 +47,72 @@ namespace A03_abstraction
 
                     using (SqlCommand cmd = new SqlCommand(checkTableSql, conn))
                     {
-                        cmd.Parameters.AddWithValue("@TableName", table);
+                        cmd.Parameters.AddWithValue("@TableName", tableName);
 
                         object result = cmd.ExecuteScalar();
 
-                        if (result != null)
-                        {
-                            txtResult.Text = "Source table exists.";
-                        }
-                        else
-                        {
-                            txtResult.Text = "Source table does NOT exist.";
-                        }
+                        return result != null;
                     }
                 }
             }
             catch (Exception ex)
             {
-                // Show connection or query error
-                txtResult.Text = "Error: " + ex.Message;
+                errorMessage = ex.Message;
+                return false;
             }
+        }
+
+        // Check both source and destination tables.
+        private void btnCheckSource_Click(object sender, RoutedEventArgs e)
+        {
+            // Read source values
+            string srcServer = txtSourceServer.Text.Trim();
+            string srcDatabase = txtSourceDatabase.Text.Trim();
+            string srcTable = txtSourceTable.Text.Trim();
+
+            // Read destination values
+            string destServer = txtDestServer.Text.Trim();
+            string destDatabase = txtDestDatabase.Text.Trim();
+            string destTable = txtDestTable.Text.Trim();
+
+            // Basic validation
+            if (string.IsNullOrEmpty(srcServer) ||
+                string.IsNullOrEmpty(srcDatabase) ||
+                string.IsNullOrEmpty(srcTable) ||
+                string.IsNullOrEmpty(destServer) ||
+                string.IsNullOrEmpty(destDatabase) ||
+                string.IsNullOrEmpty(destTable))
+            {
+                txtResult.Text = "Please enter all source and destination fields.";
+                return;
+            }
+
+            // Check source table
+            string srcError;
+            bool srcExists = TableExists(srcServer, srcDatabase, srcTable, out srcError);
+
+            // Check destination table
+            string destError;
+            bool destExists = TableExists(destServer, destDatabase, destTable, out destError);
+
+            // Build status message
+            string message = "";
+
+            if (!string.IsNullOrEmpty(srcError))
+                message += "Source error: " + srcError + Environment.NewLine;
+            else
+                message += srcExists
+                    ? "Source table exists." + Environment.NewLine
+                    : "Source table does NOT exist." + Environment.NewLine;
+
+            if (!string.IsNullOrEmpty(destError))
+                message += "Destination error: " + destError;
+            else
+                message += destExists
+                    ? "Destination table exists."
+                    : "Destination table does NOT exist.";
+
+            txtResult.Text = message;
         }
     }
 }
