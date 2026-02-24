@@ -15,7 +15,6 @@ using System.Windows.Shapes;
 using System.Data;
 using System.Data.SqlClient;
 
-
 namespace A03_abstraction
 {
     public partial class MainWindow : Window
@@ -23,6 +22,7 @@ namespace A03_abstraction
         public MainWindow()
         {
             InitializeComponent();
+
         }
 
         // Helper method to check if a table exists in a given server/database.
@@ -62,20 +62,77 @@ namespace A03_abstraction
             }
         }
 
-        // Check both source and destination tables.
+        // Reads the schema (column name and data type) for a given table.
+        private DataTable? GetTableSchema(string server, string database, string tableName, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+
+            string connString =
+                $"Server={server};Database={database};Integrated Security=true;";
+
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(connString))
+                {
+                    conn.Open();
+
+                    string sql = $"SELECT * FROM {tableName}";
+
+                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    using (SqlDataReader reader = cmd.ExecuteReader(CommandBehavior.SchemaOnly))
+                    {
+                        DataTable schemaTable = reader.GetSchemaTable();
+                        return schemaTable;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return null;
+            }
+        }
+
+        // Compares two schema tables. Returns true if columns and data types match.
+        private bool SchemasMatch(DataTable sourceSchema, DataTable destSchema)
+        {
+            // Quick check: same number of columns?
+            if (sourceSchema.Rows.Count != destSchema.Rows.Count)
+                return false;
+
+            for (int i = 0; i < sourceSchema.Rows.Count; i++)
+            {
+                var srcRow = sourceSchema.Rows[i];
+                var destRow = destSchema.Rows[i];
+
+                string srcName = srcRow["ColumnName"].ToString() ?? "";
+                string destName = destRow["ColumnName"].ToString() ?? "";
+
+                string srcType = srcRow["DataType"].ToString() ?? "";
+                string destType = destRow["DataType"].ToString() ?? "";
+
+                if (!srcName.Equals(destName, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                if (!srcType.Equals(destType, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            return true;
+        }
+
+        // Check both source and destination tables, and compare schema if both exist.
         private void btnCheckSource_Click(object sender, RoutedEventArgs e)
         {
-            // Read source values
+            // 1. Read fields
             string srcServer = txtSourceServer.Text.Trim();
             string srcDatabase = txtSourceDatabase.Text.Trim();
             string srcTable = txtSourceTable.Text.Trim();
 
-            // Read destination values
             string destServer = txtDestServer.Text.Trim();
             string destDatabase = txtDestDatabase.Text.Trim();
             string destTable = txtDestTable.Text.Trim();
 
-            // Basic validation
             if (string.IsNullOrEmpty(srcServer) ||
                 string.IsNullOrEmpty(srcDatabase) ||
                 string.IsNullOrEmpty(srcTable) ||
@@ -87,32 +144,220 @@ namespace A03_abstraction
                 return;
             }
 
-            // Check source table
+            // 2. Check existence
             string srcError;
             bool srcExists = TableExists(srcServer, srcDatabase, srcTable, out srcError);
 
-            // Check destination table
             string destError;
             bool destExists = TableExists(destServer, destDatabase, destTable, out destError);
 
-            // Build status message
-            string message = "";
-
             if (!string.IsNullOrEmpty(srcError))
-                message += "Source error: " + srcError + Environment.NewLine;
-            else
-                message += srcExists
-                    ? "Source table exists." + Environment.NewLine
-                    : "Source table does NOT exist." + Environment.NewLine;
+            {
+                txtResult.Text = "Source error: " + srcError;
+                return;
+            }
+
+            if (!srcExists)
+            {
+                txtResult.Text = "Source table does NOT exist.";
+                return;
+            }
 
             if (!string.IsNullOrEmpty(destError))
-                message += "Destination error: " + destError;
-            else
-                message += destExists
-                    ? "Destination table exists."
-                    : "Destination table does NOT exist.";
+            {
+                txtResult.Text = "Destination error: " + destError;
+                return;
+            }
 
-            txtResult.Text = message;
+            if (!destExists)
+            {
+                // Destination table does not exist → create it using source schema.
+                string createSchemaError;
+                DataTable? srcSchemaForCreate = GetTableSchema(srcServer, srcDatabase, srcTable, out createSchemaError);
+
+                if (srcSchemaForCreate == null)
+                {
+                    txtResult.Text = "Could not read source schema to create destination: " + createSchemaError;
+                    return;
+                }
+
+                string createError;
+                bool created = CreateDestinationTable(destServer, destDatabase, destTable, srcSchemaForCreate, out createError);
+
+                if (!created)
+                {
+                    txtResult.Text = "Failed to create destination table: " + createError;
+                    return;
+                }
+
+                txtResult.Text = "Destination table did not exist. It has been created based on the source schema.";
+                return;
+            }
+
+            // 3. Both tables exist → compare schemas
+            string schemaError;
+
+            DataTable? srcSchema = GetTableSchema(srcServer, srcDatabase, srcTable, out schemaError);
+            if (srcSchema == null)
+            {
+                txtResult.Text = "Could not read source schema: " + schemaError;
+                return;
+            }
+
+            DataTable? destSchema = GetTableSchema(destServer, destDatabase, destTable, out schemaError);
+            if (destSchema == null)
+            {
+                txtResult.Text = "Could not read destination schema: " + schemaError;
+                return;
+            }
+
+            bool match = SchemasMatch(srcSchema, destSchema);
+
+            txtResult.Text = match
+                ? "Source and destination schemas MATCH. Safe to copy data."
+                : "Source and destination schemas do NOT match.";
         }
+
+        // Show column names of the source table (e.g., Northwind.Products)
+        private void btnShowSourceColumns_Click(object sender, RoutedEventArgs e)
+        {
+            // Read source values
+            string srcServer = txtSourceServer.Text.Trim();
+            string srcDatabase = txtSourceDatabase.Text.Trim();
+            string srcTable = txtSourceTable.Text.Trim();
+
+            if (string.IsNullOrEmpty(srcServer) ||
+                string.IsNullOrEmpty(srcDatabase) ||
+                string.IsNullOrEmpty(srcTable))
+            {
+                txtResult.Text = "Please enter source server, database, and table first.";
+                return;
+            }
+
+            string connString =
+                $"Server={srcServer};Database={srcDatabase};Integrated Security=true;";
+
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(connString))
+                {
+                    conn.Open();
+
+                    string sql = $"SELECT * FROM {srcTable}";
+
+                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    using (SqlDataReader reader = cmd.ExecuteReader(CommandBehavior.SchemaOnly))
+                    {
+                        DataTable schemaTable = reader.GetSchemaTable();
+
+                        if (schemaTable == null)
+                        {
+                            txtResult.Text = "Could not read schema information.";
+                            return;
+                        }
+
+                        string message = "Source columns:" + Environment.NewLine;
+
+                        foreach (DataRow row in schemaTable.Rows)
+                        {
+                            string columnName = row["ColumnName"].ToString();
+                            string dataType = row["DataType"].ToString();
+
+                            message += $"- {columnName} ({dataType}){Environment.NewLine}";
+                        }
+
+                        txtResult.Text = message;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                txtResult.Text = "Error reading schema: " + ex.Message;
+            }
+        }
+
+
+        // Builds a simple CREATE TABLE statement based on the source schema.
+        private string BuildCreateTableSql(string destTableName, DataTable sourceSchema)
+        {
+            // Basic CREATE TABLE template
+            // We will generate: CREATE TABLE [destTableName] ( [Col1] INT, [Col2] NVARCHAR(50), ... )
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"CREATE TABLE [{destTableName}] (");
+
+            for (int i = 0; i < sourceSchema.Rows.Count; i++)
+            {
+                DataRow row = sourceSchema.Rows[i];
+
+                string columnName = row["ColumnName"].ToString() ?? "";
+                Type dataType = (Type)row["DataType"];
+
+                // Map .NET types to SQL Server types (simple mapping)
+                string sqlType;
+
+                if (dataType == typeof(int))
+                    sqlType = "INT";
+                else if (dataType == typeof(short))
+                    sqlType = "SMALLINT";
+                else if (dataType == typeof(long))
+                    sqlType = "BIGINT";
+                else if (dataType == typeof(decimal) || dataType == typeof(double) || dataType == typeof(float))
+                    sqlType = "DECIMAL(18, 2)";
+                else if (dataType == typeof(DateTime))
+                    sqlType = "DATETIME";
+                else if (dataType == typeof(bool))
+                    sqlType = "BIT";
+                else
+                    // default to NVARCHAR for unknown/string types
+                    sqlType = "NVARCHAR(255)";
+
+                sb.Append($"[{columnName}] {sqlType}");
+
+                if (i < sourceSchema.Rows.Count - 1)
+                    sb.Append(", ");
+            }
+
+            sb.Append(");");
+            return sb.ToString();
+        }
+
+
+        // Creates the destination table using the source schema.
+        private bool CreateDestinationTable(
+            string destServer,
+            string destDatabase,
+            string destTable,
+            DataTable sourceSchema,
+            out string errorMessage)
+        {
+            errorMessage = string.Empty;
+
+            string connString =
+                $"Server={destServer};Database={destDatabase};Integrated Security=true;";
+
+            try
+            {
+                string createSql = BuildCreateTableSql(destTable, sourceSchema);
+
+                using (SqlConnection conn = new SqlConnection(connString))
+                {
+                    conn.Open();
+
+                    using (SqlCommand cmd = new SqlCommand(createSql, conn))
+                    {
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return false;
+            }
+        }
+
+
     }
 }
